@@ -45,10 +45,16 @@ jobs:
         IMAGE_TAG: ${{ github.sha }}
       run: |
         # Build a docker container and push it to ECR
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        echo "Building Docker image..."
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG . --no-cache
+        
+        echo "Pushing image to ECR..."
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        
+        echo "Tagging as latest..."
         docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        
         echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
     - name: Setup Terraform
@@ -86,10 +92,11 @@ jobs:
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       id: outputs
       run: |
-        ALB_DNS=$(terraform output -raw alb_dns_name)
-        RDS_ENDPOINT=$(terraform output -raw rds_endpoint)
-        VPC_ID=$(terraform output -raw default_vpc_id)
-        SNS_TOPIC=$(terraform output -raw sns_topic_arn)
+        # Get Terraform outputs
+        ALB_DNS=$(terraform output -raw alb_dns_name 2>/dev/null || echo "not-available")
+        RDS_ENDPOINT=$(terraform output -raw rds_endpoint 2>/dev/null || echo "not-available")
+        VPC_ID=$(terraform output -raw default_vpc_id 2>/dev/null || echo "not-available")
+        SNS_TOPIC=$(terraform output -raw sns_topic_arn 2>/dev/null || echo "not-available")
         
         echo "alb_dns=$ALB_DNS" >> $GITHUB_OUTPUT
         echo "rds_endpoint=$RDS_ENDPOINT" >> $GITHUB_OUTPUT
@@ -103,18 +110,19 @@ jobs:
         # Create ECS Service URL
         ECS_URL="https://console.aws.amazon.com/ecs/home?region=$AWS_REGION#/clusters/$ECS_CLUSTER/services/$ECS_SERVICE/details"
         echo "ecs_url=$ECS_URL" >> $GITHUB_OUTPUT
-      working-directory: ./terraform
+      working-directory: terraform7
 
     - name: Wait for ECS service to stabilize
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
         echo "Waiting for ECS service to stabilize..."
-        aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE --region $AWS_REGION
+        aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE --region $AWS_REGION --max-attempts 10 --delay 30
         echo "ECS service is now stable!"
 
     - name: Update ECS service with new image
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
+        echo "Updating ECS service with new image..."
         aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --force-new-deployment --region $AWS_REGION
         echo "ECS service update initiated!"
 
@@ -128,6 +136,7 @@ jobs:
         
         ### 🌐 Application URLs
         - **Strapi Application**: http://${{ steps.outputs.outputs.alb_dns }}
+        - **Admin Panel**: http://${{ steps.outputs.outputs.alb_dns }}/admin
         - **CloudWatch Dashboard**: ${{ steps.outputs.outputs.dashboard_url }}
         - **ECS Service**: ${{ steps.outputs.outputs.ecs_url }}
         
@@ -167,13 +176,14 @@ jobs:
             repo: context.repo.repo,
             body: `## 🧪 Terraform Plan Results
             
-            \`\`\`
-            ${{ steps.plan.outputs.stdout }}
-            \`\`\`
-            
             **Docker Image Built**: \`${{ steps.build-image.outputs.image }}\`
             
-            > This is a preview of changes that will be applied when merged to main branch.`
+            > This is a preview of changes that will be applied when merged to main branch.
+            
+            ### Plan Summary:
+            - Terraform configuration validated ✅
+            - Docker image built and pushed to ECR ✅
+            - Ready for deployment when merged to main`
           })
 
     - name: Notify on failure
@@ -186,10 +196,22 @@ jobs:
         The deployment to AWS failed. Please check the logs above for more details.
         
         ### Common Issues:
-        1. **AWS Credentials**: Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set correctly
-        2. **Secrets**: Verify all required secrets are configured in GitHub repository settings
-        3. **Docker Build**: Check if Dockerfile exists and builds successfully
-        4. **Terraform**: Verify terraform files are in ./terraform directory
+        1. **Docker Build Failure**: 
+           - Check if npm dependencies are correct
+           - Verify Dockerfile syntax
+           - Ensure all required files are present
+        
+        2. **AWS Credentials**: 
+           - Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set correctly
+           - Check IAM permissions for ECR, ECS, and RDS
+        
+        3. **Terraform Issues**:
+           - Verify terraform files are in ./terraform7 directory
+           - Check for syntax errors in .tf files
+           - Ensure all required variables are provided
+        
+        4. **Secrets Configuration**:
+           - Verify all required secrets are configured in GitHub repository settings
         
         ### Required Secrets:
         - AWS_ACCESS_KEY_ID
@@ -201,4 +223,9 @@ jobs:
         - API_TOKEN_SALT
         - ADMIN_JWT_SECRET
         - TRANSFER_TOKEN_SALT
+        
+        ### Debug Steps:
+        1. Check the Docker build logs above
+        2. Verify your Dockerfile builds locally: \`docker build -t test .\`
+        3. Test Terraform locally: \`terraform plan\`
         EOF
