@@ -7,30 +7,21 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install ALL dependencies (including devDependencies for build)
+RUN npm install
 
 # Copy all project files
 COPY . .
 
-# Set NODE_ENV to production
+# Set environment variables
 ENV NODE_ENV=production
+ENV STRAPI_DISABLE_UPDATE_NOTIFICATION=true
 
-# Build the admin panel (only if needed)
-RUN npm run build || echo "Build step skipped or failed, continuing..."
-
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S strapi -u 1001
-RUN chown -R strapi:nodejs /app
-USER strapi
+# Create uploads directory
+RUN mkdir -p public/uploads && chmod 755 public/uploads
 
 # Expose default Strapi port
 EXPOSE 1337
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:1337/_health || exit 1
-
-# Run Strapi in production mode
-CMD ["npm", "run", "start"]
+# Run Strapi - it will build on first run if needed
+CMD ["npm", "run", "develop"]
