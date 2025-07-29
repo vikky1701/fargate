@@ -83,9 +83,12 @@ jobs:
       working-directory: terraform7
 
     - name: Terraform Apply
+      id: terraform-apply
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
       run: |
+        echo "TERRAFORM_APPLY_STARTED=true" >> $GITHUB_ENV
         terraform apply -auto-approve tfplan
+        echo "TERRAFORM_APPLY_SUCCESS=true" >> $GITHUB_ENV
       working-directory: terraform7
 
     - name: Get outputs and create deployment summary
@@ -126,8 +129,45 @@ jobs:
         aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --force-new-deployment --region $AWS_REGION
         echo "ECS service update initiated!"
 
-    - name: Create deployment summary
+    - name: Verify deployment health
       if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      id: health-check
+      run: |
+        echo "Checking deployment health..."
+        
+        # Get ALB DNS
+        ALB_DNS=$(terraform output -raw alb_dns_name 2>/dev/null || echo "")
+        
+        if [ -n "$ALB_DNS" ] && [ "$ALB_DNS" != "not-available" ]; then
+          echo "Testing health endpoint..."
+          
+          # Wait for ALB to be ready
+          sleep 60
+          
+          # Test health endpoint with retries
+          for i in {1..5}; do
+            if curl -f -s "http://$ALB_DNS/_health" || curl -f -s "http://$ALB_DNS/admin"; then
+              echo "✅ Health check passed!"
+              echo "HEALTH_CHECK_PASSED=true" >> $GITHUB_ENV
+              break
+            else
+              echo "⚠️  Health check attempt $i failed, retrying in 30s..."
+              sleep 30
+            fi
+          done
+          
+          if [ "$HEALTH_CHECK_PASSED" != "true" ]; then
+            echo "❌ Health check failed after 5 attempts"
+            echo "HEALTH_CHECK_FAILED=true" >> $GITHUB_ENV
+            exit 1
+          fi
+        else
+          echo "⚠️  Could not get ALB DNS for health check"
+        fi
+      working-directory: terraform7
+
+    - name: Create deployment summary
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.HEALTH_CHECK_PASSED == 'true'
       run: |
         cat << EOF >> $GITHUB_STEP_SUMMARY
         # 🚀 Strapi Deployment Summary
@@ -137,6 +177,7 @@ jobs:
         ### 🌐 Application URLs
         - **Strapi Application**: http://${{ steps.outputs.outputs.alb_dns }}
         - **Admin Panel**: http://${{ steps.outputs.outputs.alb_dns }}/admin
+        - **Health Check**: http://${{ steps.outputs.outputs.alb_dns }}/_health
         - **CloudWatch Dashboard**: ${{ steps.outputs.outputs.dashboard_url }}
         - **ECS Service**: ${{ steps.outputs.outputs.ecs_url }}
         
@@ -160,7 +201,7 @@ jobs:
         ---
         
         **Next Steps:**
-        1. Wait 2-3 minutes for the application to fully start
+        1. Your application is ready and healthy! 🎉
         2. Access your Strapi admin at: http://${{ steps.outputs.outputs.alb_dns }}/admin
         3. Monitor application health via the CloudWatch dashboard
         EOF
@@ -186,14 +227,51 @@ jobs:
             - Ready for deployment when merged to main`
           })
 
-    - name: Notify on failure
+    # CLEANUP ON FAILURE STEPS
+    - name: Terraform Destroy on Failure
+      if: failure() && env.TERRAFORM_APPLY_STARTED == 'true'
+      run: |
+        echo "🧹 Deployment failed, initiating cleanup..."
+        echo "This will destroy all created infrastructure to avoid charges."
+        
+        # Add a small delay to ensure resources are in a stable state
+        sleep 30
+        
+        # Attempt to destroy with the same variables
+        terraform destroy -auto-approve \
+          -var="db_password=${{ secrets.DB_PASSWORD }}" \
+          -var="ecr_image_url=${{ steps.build-image.outputs.image }}" \
+          -var="alert_email=${{ secrets.ALERT_EMAIL }}" \
+          -var="app_keys=${{ secrets.APP_KEYS }}" \
+          -var="jwt_secret=${{ secrets.JWT_SECRET }}" \
+          -var="api_token_salt=${{ secrets.API_TOKEN_SALT }}" \
+          -var="admin_jwt_secret=${{ secrets.ADMIN_JWT_SECRET }}" \
+          -var="transfer_token_salt=${{ secrets.TRANSFER_TOKEN_SALT }}" || \
+        echo "⚠️  Some resources may need manual cleanup"
+        
+        echo "🧹 Cleanup completed"
+      working-directory: terraform7
+
+    - name: Notify on failure with cleanup info
       if: failure()
       run: |
         cat << EOF >> $GITHUB_STEP_SUMMARY
         # ❌ Deployment Failed
         
+        ## 🧹 Cleanup Status
+        $(if [ "$TERRAFORM_APPLY_STARTED" = "true" ]; then
+          echo "✅ **Terraform destroy executed** - Infrastructure cleanup attempted"
+          echo ""
+          echo "Most AWS resources should be cleaned up automatically to prevent charges."
+          echo "Please verify in the AWS console that all resources are removed."
+        else
+          echo "ℹ️  **No Terraform resources created** - No cleanup needed"
+          echo ""
+          echo "Failure occurred before infrastructure deployment."
+        fi)
+        
         ## Error Details
-        The deployment to AWS failed. Please check the logs above for more details.
+        The deployment to AWS failed. Infrastructure cleanup has been attempted.
         
         ### Common Issues:
         1. **Docker Build Failure**: 
@@ -213,6 +291,11 @@ jobs:
         4. **Secrets Configuration**:
            - Verify all required secrets are configured in GitHub repository settings
         
+        5. **Health Check Failure**:
+           - Application may not be responding correctly
+           - Check ECS task logs for startup errors
+           - Verify database connectivity
+        
         ### Required Secrets:
         - AWS_ACCESS_KEY_ID
         - AWS_SECRET_ACCESS_KEY  
@@ -225,7 +308,60 @@ jobs:
         - TRANSFER_TOKEN_SALT
         
         ### Debug Steps:
-        1. Check the Docker build logs above
+        1. Check the logs above for specific error messages
         2. Verify your Dockerfile builds locally: \`docker build -t test .\`
         3. Test Terraform locally: \`terraform plan\`
+        4. If resources weren't cleaned up automatically, run: \`terraform destroy\`
+        
+        ### Manual Cleanup (if needed):
+        If automatic cleanup failed, you may need to manually remove:
+        - ECS Service and Cluster
+        - RDS Database Instance
+        - Load Balancer and Target Groups
+        - Security Groups
+        - CloudWatch Log Groups
+        - IAM Roles
         EOF
+
+  # Optional: Manual cleanup job that can be triggered
+  cleanup:
+    name: Manual Cleanup
+    runs-on: ubuntu-latest
+    environment: production
+    if: github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+        terraform_wrapper: false
+
+    - name: Terraform Init
+      run: terraform init
+      working-directory: terraform7
+
+    - name: Manual Terraform Destroy
+      run: |
+        echo "🧹 Initiating manual cleanup of all infrastructure..."
+        terraform destroy -auto-approve \
+          -var="db_password=${{ secrets.DB_PASSWORD }}" \
+          -var="ecr_image_url=dummy" \
+          -var="alert_email=${{ secrets.ALERT_EMAIL }}" \
+          -var="app_keys=${{ secrets.APP_KEYS }}" \
+          -var="jwt_secret=${{ secrets.JWT_SECRET }}" \
+          -var="api_token_salt=${{ secrets.API_TOKEN_SALT }}" \
+          -var="admin_jwt_secret=${{ secrets.ADMIN_JWT_SECRET }}" \
+          -var="transfer_token_salt=${{ secrets.TRANSFER_TOKEN_SALT }}"
+        echo "✅ Manual cleanup completed"
+      working-directory: terraform7
