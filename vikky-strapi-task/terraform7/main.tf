@@ -122,7 +122,7 @@ resource "aws_security_group" "rds_sg" {
   }
 }
 
-# ECS Cluster
+# ECS Cluster with Fargate Spot capacity provider
 resource "aws_ecs_cluster" "strapi_cluster" {
   name = "strapi-cluster-vivek"
 
@@ -134,6 +134,19 @@ resource "aws_ecs_cluster" "strapi_cluster" {
 
   tags = {
     Name = "strapi-cluster-vivek"
+  }
+}
+
+# ECS Cluster Capacity Providers
+resource "aws_ecs_cluster_capacity_providers" "strapi_cluster_capacity_providers" {
+  cluster_name = aws_ecs_cluster.strapi_cluster.name
+
+  capacity_providers = ["FARGATE_SPOT", "FARGATE"]
+
+  default_capacity_provider_strategy {
+    base              = 1
+    weight            = 100
+    capacity_provider = "FARGATE_SPOT"
   }
 }
 
@@ -473,13 +486,18 @@ resource "aws_ecs_task_definition" "strapi_task" {
   }
 }
 
-# ECS Service
+# ECS Service with Fargate Spot
 resource "aws_ecs_service" "strapi_service" {
   name            = "strapi-service-vivek"
   cluster         = aws_ecs_cluster.strapi_cluster.id
   task_definition = aws_ecs_task_definition.strapi_task.arn
-  launch_type     = "FARGATE"
   desired_count   = 1
+
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE_SPOT"
+    weight           = 100
+    base             = 1
+  }
 
   network_configuration {
     subnets          = slice(data.aws_subnets.default_public.ids, 0, 2)
@@ -495,7 +513,8 @@ resource "aws_ecs_service" "strapi_service" {
 
   depends_on = [
     aws_lb_listener.strapi_listener,
-    aws_db_instance.strapi_postgres
+    aws_db_instance.strapi_postgres,
+    aws_ecs_cluster_capacity_providers.strapi_cluster_capacity_providers
   ]
 
   tags = {

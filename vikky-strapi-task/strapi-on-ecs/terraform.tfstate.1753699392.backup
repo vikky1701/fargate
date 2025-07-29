@@ -1,48 +1,19 @@
 {
   "version": 4,
   "terraform_version": "1.12.2",
-  "serial": 19,
-  "lineage": "12791639-ca8f-4fe7-2f69-e2639634cbb0",
+  "serial": 59,
+  "lineage": "c5c231dc-b7e8-14fd-0615-6cf53bc644f7",
   "outputs": {
-    "alb_dns_name": {
-      "value": "strapi-alb-vivek-954586590.us-east-2.elb.amazonaws.com",
+    "cloudwatch_dashboard_url": {
+      "value": "https://us-east-2.console.aws.amazon.com/cloudwatch/home?region=us-east-2#dashboards:name=strapi-dashboard-vivek",
       "type": "string"
     },
-    "ecs_cluster_name": {
-      "value": "strapi-cluster-vivek",
+    "cloudwatch_log_group": {
+      "value": "/ecs/strapi-task-vivek",
       "type": "string"
     },
-    "rds_endpoint": {
-      "value": null,
-      "type": "string"
-    },
-    "security_group_ids": {
-      "value": {
-        "alb_sg": "sg-0127f8a045a7edc15",
-        "ecs_sg": null,
-        "rds_sg": null
-      },
-      "type": [
-        "object",
-        {
-          "alb_sg": "string",
-          "ecs_sg": "string",
-          "rds_sg": "string"
-        }
-      ]
-    },
-    "subnet_ids": {
-      "value": [
-        "subnet-0f768008c6324831f",
-        "subnet-0c0bb5df2571165a9"
-      ],
-      "type": [
-        "list",
-        "string"
-      ]
-    },
-    "vpc_id": {
-      "value": "vpc-06ba36bca6b59f95e",
+    "load_balancer_dns": {
+      "value": "strapi-alb-vivek-1566991487.us-east-2.elb.amazonaws.com",
       "type": "string"
     }
   },
@@ -167,7 +138,7 @@
             "assign_ipv6_address_on_creation": false,
             "availability_zone": "us-east-2c",
             "availability_zone_id": "use2-az3",
-            "available_ip_address_count": 4065,
+            "available_ip_address_count": 4067,
             "cidr_block": "172.31.32.0/20",
             "customer_owned_ipv4_pool": "",
             "default_for_az": true,
@@ -277,6 +248,37 @@
     {
       "mode": "managed",
       "type": "aws_cloudwatch_log_group",
+      "name": "alb_logs",
+      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "arn": "arn:aws:logs:us-east-2:607700977843:log-group:/aws/loadbalancer/strapi-alb-vivek",
+            "id": "/aws/loadbalancer/strapi-alb-vivek",
+            "kms_key_id": "",
+            "log_group_class": "STANDARD",
+            "name": "/aws/loadbalancer/strapi-alb-vivek",
+            "name_prefix": "",
+            "region": "us-east-2",
+            "retention_in_days": 7,
+            "skip_destroy": false,
+            "tags": {
+              "Name": "strapi-alb-logs-vivek"
+            },
+            "tags_all": {
+              "Name": "strapi-alb-logs-vivek"
+            }
+          },
+          "sensitive_attributes": [],
+          "identity_schema_version": 0,
+          "private": "bnVsbA=="
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_cloudwatch_log_group",
       "name": "strapi_logs",
       "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
       "instances": [
@@ -307,38 +309,147 @@
     },
     {
       "mode": "managed",
-      "type": "aws_db_subnet_group",
-      "name": "strapi_db_subnet_group",
+      "type": "aws_cloudwatch_log_metric_filter",
+      "name": "error_count",
       "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
       "instances": [
         {
           "schema_version": 0,
           "attributes": {
-            "arn": "arn:aws:rds:us-east-2:607700977843:subgrp:strapi-db-subnet-group-vivek",
-            "description": "Managed by Terraform",
-            "id": "strapi-db-subnet-group-vivek",
-            "name": "strapi-db-subnet-group-vivek",
-            "name_prefix": "",
-            "region": "us-east-2",
-            "subnet_ids": [
-              "subnet-0c96facf86fb39677",
-              "subnet-0dc0f70ddea3c7b99"
+            "apply_on_transformed_logs": false,
+            "id": "strapi-error-count-vivek",
+            "log_group_name": "/ecs/strapi-task-vivek",
+            "metric_transformation": [
+              {
+                "default_value": "",
+                "dimensions": {},
+                "name": "ErrorCount",
+                "namespace": "Strapi/Application",
+                "unit": "None",
+                "value": "1"
+              }
             ],
-            "supported_network_types": [
-              "IPV4"
-            ],
-            "tags": {
-              "Name": "strapi-db-subnet-group-vivek"
-            },
-            "tags_all": {
-              "Name": "strapi-db-subnet-group-vivek"
-            },
-            "vpc_id": "vpc-06ba36bca6b59f95e"
+            "name": "strapi-error-count-vivek",
+            "pattern": "[timestamp, requestId, level=\"ERROR\", ...]",
+            "region": "us-east-2"
           },
           "sensitive_attributes": [],
           "identity_schema_version": 0,
           "private": "bnVsbA==",
           "dependencies": [
+            "aws_cloudwatch_log_group.strapi_logs"
+          ]
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_cloudwatch_metric_alarm",
+      "name": "application_errors",
+      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+      "instances": [
+        {
+          "schema_version": 1,
+          "attributes": {
+            "actions_enabled": true,
+            "alarm_actions": [
+              "arn:aws:sns:us-east-2:607700977843:strapi-alerts-vivek"
+            ],
+            "alarm_description": "This metric monitors application errors",
+            "alarm_name": "strapi-application-errors-vivek",
+            "arn": "arn:aws:cloudwatch:us-east-2:607700977843:alarm:strapi-application-errors-vivek",
+            "comparison_operator": "GreaterThanThreshold",
+            "datapoints_to_alarm": 0,
+            "dimensions": {},
+            "evaluate_low_sample_count_percentiles": "",
+            "evaluation_periods": 1,
+            "extended_statistic": "",
+            "id": "strapi-application-errors-vivek",
+            "insufficient_data_actions": [],
+            "metric_name": "ErrorCount",
+            "metric_query": [],
+            "namespace": "Strapi/Application/Vivek",
+            "ok_actions": [],
+            "period": 300,
+            "region": "us-east-2",
+            "statistic": "Sum",
+            "tags": {
+              "Name": "strapi-app-errors-alarm-vivek"
+            },
+            "tags_all": {
+              "Name": "strapi-app-errors-alarm-vivek"
+            },
+            "threshold": 5,
+            "threshold_metric_id": "",
+            "treat_missing_data": "notBreaching",
+            "unit": ""
+          },
+          "sensitive_attributes": [],
+          "identity_schema_version": 0,
+          "private": "eyJzY2hlbWFfdmVyc2lvbiI6IjEifQ==",
+          "dependencies": [
+            "aws_sns_topic.alerts",
+            "aws_sns_topic.strapi_alerts"
+          ]
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_cloudwatch_metric_alarm",
+      "name": "rds_high_cpu",
+      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+      "instances": [
+        {
+          "schema_version": 1,
+          "attributes": {
+            "actions_enabled": true,
+            "alarm_actions": [
+              "arn:aws:sns:us-east-2:607700977843:strapi-alerts-vivek"
+            ],
+            "alarm_description": "This metric monitors RDS CPU utilization",
+            "alarm_name": "strapi-rds-high-cpu-vivek",
+            "arn": "arn:aws:cloudwatch:us-east-2:607700977843:alarm:strapi-rds-high-cpu-vivek",
+            "comparison_operator": "GreaterThanThreshold",
+            "datapoints_to_alarm": 0,
+            "dimensions": {
+              "DBInstanceIdentifier": "strapi-postgres-db-vivek"
+            },
+            "evaluate_low_sample_count_percentiles": "",
+            "evaluation_periods": 2,
+            "extended_statistic": "",
+            "id": "strapi-rds-high-cpu-vivek",
+            "insufficient_data_actions": [],
+            "metric_name": "CPUUtilization",
+            "metric_query": [],
+            "namespace": "AWS/RDS",
+            "ok_actions": [],
+            "period": 300,
+            "region": "us-east-2",
+            "statistic": "Average",
+            "tags": {
+              "Name": "strapi-rds-cpu-alarm-vivek"
+            },
+            "tags_all": {
+              "Name": "strapi-rds-cpu-alarm-vivek"
+            },
+            "threshold": 80,
+            "threshold_metric_id": "",
+            "treat_missing_data": "missing",
+            "unit": ""
+          },
+          "sensitive_attributes": [],
+          "identity_schema_version": 0,
+          "private": "eyJzY2hlbWFfdmVyc2lvbiI6IjEifQ==",
+          "dependencies": [
+            "aws_db_instance.strapi_postgres",
+            "aws_db_subnet_group.strapi_db_subnet_group",
+            "aws_iam_role.rds_monitoring_role",
+            "aws_security_group.alb_sg",
+            "aws_security_group.ecs_sg",
+            "aws_security_group.rds_sg",
+            "aws_sns_topic.alerts",
+            "aws_sns_topic.strapi_alerts",
             "aws_subnet.private_subnet_1",
             "aws_subnet.private_subnet_2",
             "data.aws_availability_zones.available",
@@ -365,7 +476,7 @@
             "setting": [
               {
                 "name": "containerInsights",
-                "value": "disabled"
+                "value": "enabled"
               }
             ],
             "tags": {
@@ -378,6 +489,73 @@
           "sensitive_attributes": [],
           "identity_schema_version": 0,
           "private": "bnVsbA=="
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_iam_role",
+      "name": "rds_monitoring_role",
+      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "arn": "arn:aws:iam::607700977843:role/strapi-rds-monitoring-role-vivek",
+            "assume_role_policy": "{\"Statement\":[{\"Action\":\"sts:AssumeRole\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"monitoring.rds.amazonaws.com\"}}],\"Version\":\"2012-10-17\"}",
+            "create_date": "2025-07-28T10:05:32Z",
+            "description": "",
+            "force_detach_policies": false,
+            "id": "strapi-rds-monitoring-role-vivek",
+            "inline_policy": [],
+            "managed_policy_arns": [],
+            "max_session_duration": 3600,
+            "name": "strapi-rds-monitoring-role-vivek",
+            "name_prefix": "",
+            "path": "/",
+            "permissions_boundary": "",
+            "tags": {
+              "Name": "strapi-rds-monitoring-role-vivek"
+            },
+            "tags_all": {
+              "Name": "strapi-rds-monitoring-role-vivek"
+            },
+            "unique_id": "AROAY27ONBCZUUEYXV2IR"
+          },
+          "sensitive_attributes": [],
+          "identity_schema_version": 0,
+          "identity": {
+            "account_id": "607700977843",
+            "name": "strapi-rds-monitoring-role-vivek"
+          },
+          "private": "bnVsbA=="
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_iam_role_policy_attachment",
+      "name": "rds_monitoring_policy",
+      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+      "instances": [
+        {
+          "schema_version": 0,
+          "attributes": {
+            "id": "strapi-rds-monitoring-role-vivek/arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole",
+            "policy_arn": "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole",
+            "role": "strapi-rds-monitoring-role-vivek"
+          },
+          "sensitive_attributes": [],
+          "identity_schema_version": 0,
+          "identity": {
+            "account_id": "607700977843",
+            "policy_arn": "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole",
+            "role": "strapi-rds-monitoring-role-vivek"
+          },
+          "private": "bnVsbA==",
+          "dependencies": [
+            "aws_iam_role.rds_monitoring_role"
+          ]
         }
       ]
     },
@@ -397,8 +575,8 @@
                 "prefix": ""
               }
             ],
-            "arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:loadbalancer/app/strapi-alb-vivek/36acfebb66c8a4d8",
-            "arn_suffix": "app/strapi-alb-vivek/36acfebb66c8a4d8",
+            "arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:loadbalancer/app/strapi-alb-vivek/267fd079b1d3c44b",
+            "arn_suffix": "app/strapi-alb-vivek/267fd079b1d3c44b",
             "client_keep_alive": 3600,
             "connection_logs": [
               {
@@ -409,7 +587,7 @@
             ],
             "customer_owned_ipv4_pool": "",
             "desync_mitigation_mode": "defensive",
-            "dns_name": "strapi-alb-vivek-954586590.us-east-2.elb.amazonaws.com",
+            "dns_name": "strapi-alb-vivek-1566991487.us-east-2.elb.amazonaws.com",
             "dns_record_client_routing_policy": null,
             "drop_invalid_header_fields": false,
             "enable_cross_zone_load_balancing": true,
@@ -420,7 +598,7 @@
             "enable_xff_client_port": false,
             "enable_zonal_shift": false,
             "enforce_security_group_inbound_rules_on_private_link_traffic": "",
-            "id": "arn:aws:elasticloadbalancing:us-east-2:607700977843:loadbalancer/app/strapi-alb-vivek/36acfebb66c8a4d8",
+            "id": "arn:aws:elasticloadbalancing:us-east-2:607700977843:loadbalancer/app/strapi-alb-vivek/267fd079b1d3c44b",
             "idle_timeout": 60,
             "internal": false,
             "ip_address_type": "ipv4",
@@ -432,7 +610,7 @@
             "preserve_host_header": false,
             "region": "us-east-2",
             "security_groups": [
-              "sg-0127f8a045a7edc15"
+              "sg-04c14996464e35865"
             ],
             "subnet_mapping": [
               {
@@ -468,7 +646,7 @@
           "sensitive_attributes": [],
           "identity_schema_version": 0,
           "identity": {
-            "arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:loadbalancer/app/strapi-alb-vivek/36acfebb66c8a4d8"
+            "arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:loadbalancer/app/strapi-alb-vivek/267fd079b1d3c44b"
           },
           "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjo2MDAwMDAwMDAwMDAsImRlbGV0ZSI6NjAwMDAwMDAwMDAwLCJ1cGRhdGUiOjYwMDAwMDAwMDAwMH19",
           "dependencies": [
@@ -489,7 +667,7 @@
           "schema_version": 0,
           "attributes": {
             "alpn_policy": null,
-            "arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:listener/app/strapi-alb-vivek/36acfebb66c8a4d8/6a26c607725ec431",
+            "arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:listener/app/strapi-alb-vivek/267fd079b1d3c44b/a90227b25f89b37e",
             "certificate_arn": null,
             "default_action": [
               {
@@ -499,12 +677,12 @@
                 "forward": [],
                 "order": 1,
                 "redirect": [],
-                "target_group_arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:targetgroup/strapi-tg-vivek/575258521f7e9747",
+                "target_group_arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:targetgroup/strapi-tg-vivek/804fdd45ddfab009",
                 "type": "forward"
               }
             ],
-            "id": "arn:aws:elasticloadbalancing:us-east-2:607700977843:listener/app/strapi-alb-vivek/36acfebb66c8a4d8/6a26c607725ec431",
-            "load_balancer_arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:loadbalancer/app/strapi-alb-vivek/36acfebb66c8a4d8",
+            "id": "arn:aws:elasticloadbalancing:us-east-2:607700977843:listener/app/strapi-alb-vivek/267fd079b1d3c44b/a90227b25f89b37e",
+            "load_balancer_arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:loadbalancer/app/strapi-alb-vivek/267fd079b1d3c44b",
             "mutual_authentication": [],
             "port": 80,
             "protocol": "HTTP",
@@ -536,6 +714,9 @@
           },
           "sensitive_attributes": [],
           "identity_schema_version": 0,
+          "identity": {
+            "arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:listener/app/strapi-alb-vivek/267fd079b1d3c44b/a90227b25f89b37e"
+          },
           "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjozMDAwMDAwMDAwMDAsInVwZGF0ZSI6MzAwMDAwMDAwMDAwfX0=",
           "dependencies": [
             "aws_lb.strapi_alb",
@@ -556,8 +737,8 @@
         {
           "schema_version": 0,
           "attributes": {
-            "arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:targetgroup/strapi-tg-vivek/575258521f7e9747",
-            "arn_suffix": "targetgroup/strapi-tg-vivek/575258521f7e9747",
+            "arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:targetgroup/strapi-tg-vivek/804fdd45ddfab009",
+            "arn_suffix": "targetgroup/strapi-tg-vivek/804fdd45ddfab009",
             "connection_termination": null,
             "deregistration_delay": "300",
             "health_check": [
@@ -573,7 +754,7 @@
                 "unhealthy_threshold": 2
               }
             ],
-            "id": "arn:aws:elasticloadbalancing:us-east-2:607700977843:targetgroup/strapi-tg-vivek/575258521f7e9747",
+            "id": "arn:aws:elasticloadbalancing:us-east-2:607700977843:targetgroup/strapi-tg-vivek/804fdd45ddfab009",
             "ip_address_type": "ipv4",
             "lambda_multi_value_headers_enabled": false,
             "load_balancer_arns": [],
@@ -636,6 +817,9 @@
           },
           "sensitive_attributes": [],
           "identity_schema_version": 0,
+          "identity": {
+            "arn": "arn:aws:elasticloadbalancing:us-east-2:607700977843:targetgroup/strapi-tg-vivek/804fdd45ddfab009"
+          },
           "private": "bnVsbA==",
           "dependencies": [
             "data.aws_vpc.default"
@@ -652,7 +836,7 @@
         {
           "schema_version": 1,
           "attributes": {
-            "arn": "arn:aws:ec2:us-east-2:607700977843:security-group/sg-0127f8a045a7edc15",
+            "arn": "arn:aws:ec2:us-east-2:607700977843:security-group/sg-04c14996464e35865",
             "description": "Security group for Strapi ALB",
             "egress": [
               {
@@ -669,7 +853,7 @@
                 "to_port": 0
               }
             ],
-            "id": "sg-0127f8a045a7edc15",
+            "id": "sg-04c14996464e35865",
             "ingress": [
               {
                 "cidr_blocks": [
@@ -702,7 +886,7 @@
             "name_prefix": "",
             "owner_id": "607700977843",
             "region": "us-east-2",
-            "revoke_rules_on_delete": null,
+            "revoke_rules_on_delete": false,
             "tags": {
               "Name": "strapi-alb-sg-vivek"
             },
@@ -723,49 +907,189 @@
     },
     {
       "mode": "managed",
-      "type": "aws_subnet",
-      "name": "private_subnet_1",
+      "type": "aws_security_group",
+      "name": "ecs_sg",
       "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
       "instances": [
         {
           "schema_version": 1,
           "attributes": {
-            "arn": "arn:aws:ec2:us-east-2:607700977843:subnet/subnet-0dc0f70ddea3c7b99",
-            "assign_ipv6_address_on_creation": false,
-            "availability_zone": "us-east-2a",
-            "availability_zone_id": "use2-az1",
-            "cidr_block": "172.31.200.0/24",
-            "customer_owned_ipv4_pool": "",
-            "enable_dns64": false,
-            "enable_lni_at_device_index": 0,
-            "enable_resource_name_dns_a_record_on_launch": false,
-            "enable_resource_name_dns_aaaa_record_on_launch": false,
-            "id": "subnet-0dc0f70ddea3c7b99",
-            "ipv6_cidr_block": "",
-            "ipv6_cidr_block_association_id": "",
-            "ipv6_native": false,
-            "map_customer_owned_ip_on_launch": false,
-            "map_public_ip_on_launch": false,
-            "outpost_arn": "",
+            "arn": "arn:aws:ec2:us-east-2:607700977843:security-group/sg-0ad994069839b18a8",
+            "description": "Security group for Strapi ECS tasks",
+            "egress": [
+              {
+                "cidr_blocks": [
+                  "0.0.0.0/0"
+                ],
+                "description": "",
+                "from_port": 0,
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "protocol": "-1",
+                "security_groups": [],
+                "self": false,
+                "to_port": 0
+              }
+            ],
+            "id": "sg-0ad994069839b18a8",
+            "ingress": [
+              {
+                "cidr_blocks": [],
+                "description": "",
+                "from_port": 1337,
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "protocol": "tcp",
+                "security_groups": [
+                  "sg-04c14996464e35865"
+                ],
+                "self": false,
+                "to_port": 1337
+              }
+            ],
+            "name": "strapi-ecs-sg-vivek-2",
+            "name_prefix": "",
             "owner_id": "607700977843",
-            "private_dns_hostname_type_on_launch": "ip-name",
             "region": "us-east-2",
+            "revoke_rules_on_delete": false,
             "tags": {
-              "Name": "strapi-private-subnet-1-vivek"
+              "Name": "strapi-ecs-sg-vivek"
             },
             "tags_all": {
-              "Name": "strapi-private-subnet-1-vivek"
+              "Name": "strapi-ecs-sg-vivek"
             },
             "timeouts": null,
             "vpc_id": "vpc-06ba36bca6b59f95e"
           },
           "sensitive_attributes": [],
           "identity_schema_version": 0,
-          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjo2MDAwMDAwMDAwMDAsImRlbGV0ZSI6MTIwMDAwMDAwMDAwMH0sInNjaGVtYV92ZXJzaW9uIjoiMSJ9",
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjo2MDAwMDAwMDAwMDAsImRlbGV0ZSI6OTAwMDAwMDAwMDAwfSwic2NoZW1hX3ZlcnNpb24iOiIxIn0=",
           "dependencies": [
-            "data.aws_availability_zones.available",
+            "aws_security_group.alb_sg",
             "data.aws_vpc.default"
           ]
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_security_group",
+      "name": "rds_sg",
+      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+      "instances": [
+        {
+          "schema_version": 1,
+          "attributes": {
+            "arn": "arn:aws:ec2:us-east-2:607700977843:security-group/sg-09eb3381a9ad0c778",
+            "description": "Security group for Strapi RDS",
+            "egress": [
+              {
+                "cidr_blocks": [
+                  "0.0.0.0/0"
+                ],
+                "description": "",
+                "from_port": 0,
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "protocol": "-1",
+                "security_groups": [],
+                "self": false,
+                "to_port": 0
+              }
+            ],
+            "id": "sg-09eb3381a9ad0c778",
+            "ingress": [
+              {
+                "cidr_blocks": [],
+                "description": "",
+                "from_port": 5432,
+                "ipv6_cidr_blocks": [],
+                "prefix_list_ids": [],
+                "protocol": "tcp",
+                "security_groups": [
+                  "sg-0ad994069839b18a8"
+                ],
+                "self": false,
+                "to_port": 5432
+              }
+            ],
+            "name": "strapi-rds-sg-vivek",
+            "name_prefix": "",
+            "owner_id": "607700977843",
+            "region": "us-east-2",
+            "revoke_rules_on_delete": false,
+            "tags": {
+              "Name": "strapi-rds-sg-vivek"
+            },
+            "tags_all": {
+              "Name": "strapi-rds-sg-vivek"
+            },
+            "timeouts": null,
+            "vpc_id": "vpc-06ba36bca6b59f95e"
+          },
+          "sensitive_attributes": [],
+          "identity_schema_version": 0,
+          "private": "eyJlMmJmYjczMC1lY2FhLTExZTYtOGY4OC0zNDM2M2JjN2M0YzAiOnsiY3JlYXRlIjo2MDAwMDAwMDAwMDAsImRlbGV0ZSI6OTAwMDAwMDAwMDAwfSwic2NoZW1hX3ZlcnNpb24iOiIxIn0=",
+          "dependencies": [
+            "aws_security_group.alb_sg",
+            "aws_security_group.ecs_sg",
+            "data.aws_vpc.default"
+          ]
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_sns_topic",
+      "name": "strapi_alerts",
+      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+      "instances": [
+        {
+          "status": "tainted",
+          "schema_version": 0,
+          "attributes": {
+            "application_failure_feedback_role_arn": null,
+            "application_success_feedback_role_arn": null,
+            "application_success_feedback_sample_rate": null,
+            "archive_policy": null,
+            "arn": null,
+            "beginning_archive_time": null,
+            "content_based_deduplication": false,
+            "delivery_policy": null,
+            "display_name": null,
+            "fifo_throughput_scope": null,
+            "fifo_topic": false,
+            "firehose_failure_feedback_role_arn": null,
+            "firehose_success_feedback_role_arn": null,
+            "firehose_success_feedback_sample_rate": null,
+            "http_failure_feedback_role_arn": null,
+            "http_success_feedback_role_arn": null,
+            "http_success_feedback_sample_rate": null,
+            "id": "arn:aws:sns:us-east-2:607700977843:strapi-alerts-vivek",
+            "kms_master_key_id": null,
+            "lambda_failure_feedback_role_arn": null,
+            "lambda_success_feedback_role_arn": null,
+            "lambda_success_feedback_sample_rate": null,
+            "name": "strapi-alerts-vivek",
+            "name_prefix": null,
+            "owner": null,
+            "policy": null,
+            "region": "us-east-2",
+            "signature_version": null,
+            "sqs_failure_feedback_role_arn": null,
+            "sqs_success_feedback_role_arn": null,
+            "sqs_success_feedback_sample_rate": null,
+            "tags": {
+              "Name": "strapi-alerts-vivek"
+            },
+            "tags_all": {
+              "Name": "strapi-alerts-vivek"
+            },
+            "tracing_config": null
+          },
+          "sensitive_attributes": [],
+          "identity_schema_version": 0,
+          "private": "bnVsbA=="
         }
       ]
     },
@@ -778,7 +1102,7 @@
         {
           "schema_version": 1,
           "attributes": {
-            "arn": "arn:aws:ec2:us-east-2:607700977843:subnet/subnet-0c96facf86fb39677",
+            "arn": "arn:aws:ec2:us-east-2:607700977843:subnet/subnet-0f1ea472d7f96c016",
             "assign_ipv6_address_on_creation": false,
             "availability_zone": "us-east-2b",
             "availability_zone_id": "use2-az2",
@@ -788,7 +1112,7 @@
             "enable_lni_at_device_index": 0,
             "enable_resource_name_dns_a_record_on_launch": false,
             "enable_resource_name_dns_aaaa_record_on_launch": false,
-            "id": "subnet-0c96facf86fb39677",
+            "id": "subnet-0f1ea472d7f96c016",
             "ipv6_cidr_block": "",
             "ipv6_cidr_block_association_id": "",
             "ipv6_native": false,
