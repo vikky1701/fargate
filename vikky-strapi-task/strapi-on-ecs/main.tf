@@ -441,6 +441,10 @@ resource "aws_ecs_task_definition" "strapi_task" {
         {
           name  = "DATABASE_URL"
           value = "postgres://${var.db_user}:${var.db_password}@${aws_db_instance.strapi_postgres.address}:5432/${var.db_name}"
+        },
+        {
+        name = "JWT_SECRET"
+        value = var.jwt_secret
         }
       ]
 
@@ -899,6 +903,13 @@ variable "app_keys" {
   type        = string
   sensitive   = true
 }
+
+variable "jwt_secret" {
+  description = "Jwt_Secret"
+  type        = string
+  sensitive   = true
+}
+
 
 variable "api_token_salt" {
   description = "Strapi API_TOKEN_SALT"
