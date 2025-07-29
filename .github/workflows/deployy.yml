@@ -1,0 +1,204 @@
+name: Deploy Strapi to AWS ECS Fargate Spot
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-2
+  ECR_REPOSITORY: strapi-app-vivek
+  ECS_SERVICE: strapi-service-vivek
+  ECS_CLUSTER: strapi-cluster-vivek
+
+jobs:
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Create ECR repository if it doesn't exist
+      run: |
+        aws ecr describe-repositories --repository-names $ECR_REPOSITORY --region $AWS_REGION || \
+        aws ecr create-repository --repository-name $ECR_REPOSITORY --region $AWS_REGION
+
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        # Build a docker container and push it to ECR
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+        terraform_wrapper: false
+
+    - name: Terraform Init
+      run: terraform init
+      working-directory: terraform7
+
+    - name: Terraform Plan
+      id: plan
+      run: |
+        terraform plan -no-color -input=false \
+          -var="db_password=${{ secrets.DB_PASSWORD }}" \
+          -var="ecr_image_url=${{ steps.build-image.outputs.image }}" \
+          -var="alert_email=${{ secrets.ALERT_EMAIL }}" \
+          -var="app_keys=${{ secrets.APP_KEYS }}" \
+          -var="jwt_secret=${{ secrets.JWT_SECRET }}" \
+          -var="api_token_salt=${{ secrets.API_TOKEN_SALT }}" \
+          -var="admin_jwt_secret=${{ secrets.ADMIN_JWT_SECRET }}" \
+          -var="transfer_token_salt=${{ secrets.TRANSFER_TOKEN_SALT }}" \
+          -out=tfplan
+      working-directory: terraform7
+
+    - name: Terraform Apply
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        terraform apply -auto-approve tfplan
+      working-directory: terraform7
+
+    - name: Get outputs and create deployment summary
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      id: outputs
+      run: |
+        ALB_DNS=$(terraform output -raw alb_dns_name)
+        RDS_ENDPOINT=$(terraform output -raw rds_endpoint)
+        VPC_ID=$(terraform output -raw default_vpc_id)
+        SNS_TOPIC=$(terraform output -raw sns_topic_arn)
+        
+        echo "alb_dns=$ALB_DNS" >> $GITHUB_OUTPUT
+        echo "rds_endpoint=$RDS_ENDPOINT" >> $GITHUB_OUTPUT
+        echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
+        echo "sns_topic=$SNS_TOPIC" >> $GITHUB_OUTPUT
+        
+        # Create CloudWatch Dashboard URL
+        DASHBOARD_URL="https://console.aws.amazon.com/cloudwatch/home?region=$AWS_REGION#dashboards:name=strapi-dashboard-vivek"
+        echo "dashboard_url=$DASHBOARD_URL" >> $GITHUB_OUTPUT
+        
+        # Create ECS Service URL
+        ECS_URL="https://console.aws.amazon.com/ecs/home?region=$AWS_REGION#/clusters/$ECS_CLUSTER/services/$ECS_SERVICE/details"
+        echo "ecs_url=$ECS_URL" >> $GITHUB_OUTPUT
+      working-directory: ./terraform
+
+    - name: Wait for ECS service to stabilize
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        echo "Waiting for ECS service to stabilize..."
+        aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE --region $AWS_REGION
+        echo "ECS service is now stable!"
+
+    - name: Update ECS service with new image
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --force-new-deployment --region $AWS_REGION
+        echo "ECS service update initiated!"
+
+    - name: Create deployment summary
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        cat << EOF >> $GITHUB_STEP_SUMMARY
+        # 🚀 Strapi Deployment Summary
+        
+        ## ✅ Deployment Status: SUCCESS
+        
+        ### 🌐 Application URLs
+        - **Strapi Application**: http://${{ steps.outputs.outputs.alb_dns }}
+        - **CloudWatch Dashboard**: ${{ steps.outputs.outputs.dashboard_url }}
+        - **ECS Service**: ${{ steps.outputs.outputs.ecs_url }}
+        
+        ### 📊 Infrastructure Details
+        - **ALB DNS Name**: ${{ steps.outputs.outputs.alb_dns }}
+        - **RDS Endpoint**: ${{ steps.outputs.outputs.rds_endpoint }}
+        - **VPC ID**: ${{ steps.outputs.outputs.vpc_id }}
+        - **Docker Image**: ${{ steps.build-image.outputs.image }}
+        
+        ### 🔧 Quick Links
+        - [View Logs](https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#logsV2:log-groups/log-group/%2Fecs%2Fstrapi-task-vivek)
+        - [ECS Cluster](https://console.aws.amazon.com/ecs/home?region=${{ env.AWS_REGION }}#/clusters/${{ env.ECS_CLUSTER }})
+        - [RDS Instance](https://console.aws.amazon.com/rds/home?region=${{ env.AWS_REGION }}#database:id=strapi-postgres-db-vivek)
+        
+        ### ⏰ Deployment Info
+        - **Commit**: ${{ github.sha }}
+        - **Branch**: ${{ github.ref_name }}
+        - **Deployed by**: ${{ github.actor }}
+        - **Timestamp**: $(date -u)
+        
+        ---
+        
+        **Next Steps:**
+        1. Wait 2-3 minutes for the application to fully start
+        2. Access your Strapi admin at: http://${{ steps.outputs.outputs.alb_dns }}/admin
+        3. Monitor application health via the CloudWatch dashboard
+        EOF
+
+    - name: Comment PR with deployment info
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 🧪 Terraform Plan Results
+            
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+            
+            **Docker Image Built**: \`${{ steps.build-image.outputs.image }}\`
+            
+            > This is a preview of changes that will be applied when merged to main branch.`
+          })
+
+    - name: Notify on failure
+      if: failure()
+      run: |
+        cat << EOF >> $GITHUB_STEP_SUMMARY
+        # ❌ Deployment Failed
+        
+        ## Error Details
+        The deployment to AWS failed. Please check the logs above for more details.
+        
+        ### Common Issues:
+        1. **AWS Credentials**: Ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set correctly
+        2. **Secrets**: Verify all required secrets are configured in GitHub repository settings
+        3. **Docker Build**: Check if Dockerfile exists and builds successfully
+        4. **Terraform**: Verify terraform files are in ./terraform directory
+        
+        ### Required Secrets:
+        - AWS_ACCESS_KEY_ID
+        - AWS_SECRET_ACCESS_KEY  
+        - DB_PASSWORD
+        - ALERT_EMAIL
+        - APP_KEYS
+        - JWT_SECRET
+        - API_TOKEN_SALT
+        - ADMIN_JWT_SECRET
+        - TRANSFER_TOKEN_SALT
+        EOF
