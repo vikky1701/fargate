@@ -1,0 +1,45 @@
+name: Destroy AWS Resources
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+        terraform_wrapper: false
+
+    - name: Terraform Init
+      run: terraform init
+      working-directory: terraform7
+
+    - name: Terraform Destroy
+      run: |
+        terraform destroy -auto-approve \
+          -var="db_password=${{ secrets.DB_PASSWORD }}" \
+          -var="ecr_image_url=dummy" \
+          -var="alert_email=${{ secrets.ALERT_EMAIL }}" \
+          -var="app_keys=${{ secrets.APP_KEYS }}" \
+          -var="jwt_secret=${{ secrets.JWT_SECRET }}" \
+          -var="api_token_salt=${{ secrets.API_TOKEN_SALT }}" \
+          -var="admin_jwt_secret=${{ secrets.ADMIN_JWT_SECRET }}" \
+          -var="transfer_token_salt=${{ secrets.TRANSFER_TOKEN_SALT }}"
+      working-directory: terraform7
