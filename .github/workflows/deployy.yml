@@ -1,24 +1,62 @@
-name: Deploy Strapi to AWS
+name: Blue/Green Deployment to AWS ECS
 
 on:
   push:
+    branches: [ main, develop ]
+  pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: 'Force deployment even if no changes detected'
+        required: false
+        default: false
+        type: boolean
 
 env:
   AWS_REGION: us-east-2
-  ECR_REPOSITORY: strapi-app
+  ECR_REPOSITORY: strapi-app-vivek
+  ECR_REGISTRY: 607700977843.dkr.ecr.us-east-2.amazonaws.com
   ECS_CLUSTER: strapi-cluster-vivek
   ECS_SERVICE: strapi-service-vivek
+  ECS_TASK_DEFINITION: strapi-task-vivek
+  CODEDEPLOY_APPLICATION: strapi-app-vivek
+  CODEDEPLOY_DEPLOYMENT_GROUP: strapi-deployment-group-vivek
 
 jobs:
-  deploy:
+  build-and-deploy:
+    name: Build and Deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
 
-    - name: Configure AWS Credentials
+    - name: Check for changes
+      id: changes
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.force_deploy }}" = "true" ]; then
+          echo "changed=true" >> $GITHUB_OUTPUT
+          echo "Force deployment requested"
+        elif [ "${{ github.event_name }}" = "pull_request" ]; then
+          echo "changed=false" >> $GITHUB_OUTPUT
+          echo "PR event - skipping deployment"
+        else
+          # Check if there are changes that affect the application
+          if git diff --quiet HEAD~1 HEAD -- . ':!.github' ':!README.md' ':!*.md' || [ -z "$(git log --oneline -1 --pretty=format:"%H")" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No significant changes detected"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Changes detected, proceeding with deployment"
+          fi
+        fi
+
+    - name: Configure AWS credentials
+      if: steps.changes.outputs.changed == 'true'
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -26,50 +64,284 @@ jobs:
         aws-region: ${{ env.AWS_REGION }}
 
     - name: Login to Amazon ECR
+      if: steps.changes.outputs.changed == 'true'
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Build and Push Docker Image
-      id: build-image
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
+    - name: Extract metadata for Docker
+      if: steps.changes.outputs.changed == 'true'
+      id: meta
+      uses: docker/metadata-action@v5
       with:
-        terraform_version: 1.5.0
-        terraform_wrapper: false
+        images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
 
-    - name: Terraform Init
-      run: terraform init
-      working-directory: terraform7
+    - name: Build and push Docker image
+      if: steps.changes.outputs.changed == 'true'
+      id: build-image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
 
-    - name: Terraform Plan
+    - name: Get image URI
+      if: steps.changes.outputs.changed == 'true'
+      id: image-uri
       run: |
-        terraform plan -input=false -no-color \
-          -var="db_password=${{ secrets.DB_PASSWORD }}" \
-          -var="ecr_image_url=${{ steps.build-image.outputs.image }}" \
-          -var="alert_email=${{ secrets.ALERT_EMAIL }}" \
-          -var="app_keys=${{ secrets.APP_KEYS }}" \
-          -var="jwt_secret=${{ secrets.JWT_SECRET }}" \
-          -var="api_token_salt=${{ secrets.API_TOKEN_SALT }}" \
-          -var="admin_jwt_secret=${{ secrets.ADMIN_JWT_SECRET }}" \
-          -var="transfer_token_salt=${{ secrets.TRANSFER_TOKEN_SALT }}" \
-          -out=tfplan
-      working-directory: terraform7
+        # Extract the SHA-based tag for deployment
+        IMAGE_URI="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.ref_name }}-${{ github.sha }}"
+        echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+        echo "Deployment image: $IMAGE_URI"
 
-    - name: Terraform Apply
-      run: terraform apply -auto-approve tfplan
-      working-directory: terraform7
-
-    - name: Show Outputs
+    - name: Download current task definition
+      if: steps.changes.outputs.changed == 'true'
+      id: download-task-def
       run: |
-        echo "🟢 Deployment Complete. Outputs below:"
-        echo "ALB DNS: $(terraform output -raw alb_dns_name || echo 'N/A')"
-        echo "RDS Endpoint: $(terraform output -raw rds_endpoint || echo 'N/A')"
-      working-directory: terraform7
+        aws ecs describe-task-definition \
+          --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+          --query taskDefinition > task-definition.json
+        
+        echo "Current task definition downloaded"
+
+    - name: Update task definition with new image
+      if: steps.changes.outputs.changed == 'true'
+      id: task-def
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: task-definition.json
+        container-name: strapi
+        image: ${{ steps.image-uri.outputs.image_uri }}
+
+    - name: Register new task definition
+      if: steps.changes.outputs.changed == 'true'
+      id: register-task-def
+      run: |
+        NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+          --cli-input-json file://${{ steps.task-def.outputs.task-definition }} \
+          --query 'taskDefinition.taskDefinitionArn' \
+          --output text)
+        
+        echo "new_task_def_arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
+        echo "New task definition registered: $NEW_TASK_DEF_ARN"
+
+    - name: Create AppSpec for CodeDeploy
+      if: steps.changes.outputs.changed == 'true'
+      id: create-appspec
+      run: |
+        cat > appspec.json << EOF
+        {
+          "version": 0.0,
+          "Resources": [
+            {
+              "TargetService": {
+                "Type": "AWS::ECS::Service",
+                "Properties": {
+                  "TaskDefinition": "${{ steps.register-task-def.outputs.new_task_def_arn }}",
+                  "LoadBalancerInfo": {
+                    "ContainerName": "strapi",
+                    "ContainerPort": 1337
+                  }
+                }
+              }
+            }
+          ]
+        }
+        EOF
+        
+        echo "AppSpec created:"
+        cat appspec.json
+
+    - name: Start CodeDeploy deployment
+      if: steps.changes.outputs.changed == 'true'
+      id: deploy
+      run: |
+        # Create deployment input
+        cat > deployment-input.json << EOF
+        {
+          "applicationName": "${{ env.CODEDEPLOY_APPLICATION }}",
+          "deploymentGroupName": "${{ env.CODEDEPLOY_DEPLOYMENT_GROUP }}",
+          "deploymentConfigName": "CodeDeployDefault.ECSCanary10Percent5Minutes",
+          "revision": {
+            "revisionType": "AppSpecContent",
+            "appSpecContent": {
+              "content": $(cat appspec.json | jq -R -s .)
+            }
+          },
+          "description": "Deployment from GitHub Actions - Commit: ${{ github.sha }}"
+        }
+        EOF
+        
+        # Start deployment
+        DEPLOYMENT_ID=$(aws deploy create-deployment \
+          --cli-input-json file://deployment-input.json \
+          --query 'deploymentId' \
+          --output text)
+        
+        echo "deployment_id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+        echo "Deployment started with ID: $DEPLOYMENT_ID"
+
+    - name: Monitor deployment
+      if: steps.changes.outputs.changed == 'true'
+      id: monitor
+      run: |
+        DEPLOYMENT_ID="${{ steps.deploy.outputs.deployment_id }}"
+        echo "Monitoring deployment: $DEPLOYMENT_ID"
+        
+        # Function to get deployment status
+        get_deployment_status() {
+          aws deploy get-deployment \
+            --deployment-id "$1" \
+            --query 'deploymentInfo.status' \
+            --output text 2>/dev/null || echo "UNKNOWN"
+        }
+        
+        # Monitor loop
+        TIMEOUT=1800  # 30 minutes
+        ELAPSED=0
+        INTERVAL=30
+        
+        while [ $ELAPSED -lt $TIMEOUT ]; do
+          STATUS=$(get_deployment_status "$DEPLOYMENT_ID")
+          echo "Deployment status: $STATUS (${ELAPSED}s elapsed)"
+          
+          case $STATUS in
+            "Succeeded")
+              echo "✅ Deployment completed successfully!"
+              echo "deployment_status=success" >> $GITHUB_OUTPUT
+              break
+              ;;
+            "Failed"|"Stopped")
+              echo "❌ Deployment failed with status: $STATUS"
+              
+              # Get failure details
+              echo "Failure details:"
+              aws deploy get-deployment \
+                --deployment-id "$DEPLOYMENT_ID" \
+                --query 'deploymentInfo.errorInformation' \
+                --output text || echo "No error details available"
+              
+              echo "deployment_status=failed" >> $GITHUB_OUTPUT
+              exit 1
+              ;;
+            "Created"|"Queued"|"InProgress")
+              echo "⏳ Deployment in progress..."
+              sleep $INTERVAL
+              ELAPSED=$((ELAPSED + INTERVAL))
+              ;;
+            "UNKNOWN")
+              echo "⚠️ Unable to get deployment status, retrying..."
+              sleep $INTERVAL
+              ELAPSED=$((ELAPSED + INTERVAL))
+              ;;
+            *)
+              echo "⚠️ Unknown status: $STATUS"
+              sleep $INTERVAL
+              ELAPSED=$((ELAPSED + INTERVAL))
+              ;;
+          esac
+        done
+        
+        if [ $ELAPSED -ge $TIMEOUT ]; then
+          echo "❌ Deployment monitoring timed out after $TIMEOUT seconds"
+          echo "deployment_status=timeout" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+    - name: Get deployment URLs
+      if: steps.changes.outputs.changed == 'true' && steps.monitor.outputs.deployment_status == 'success'
+      id: urls
+      run: |
+        ALB_DNS=$(aws elbv2 describe-load-balancers \
+          --names "strapi-alb-vivek" \
+          --query 'LoadBalancers[0].DNSName' \
+          --output text)
+        
+        echo "main_url=http://$ALB_DNS" >> $GITHUB_OUTPUT
+        echo "test_url=http://$ALB_DNS:8080" >> $GITHUB_OUTPUT
+        
+        echo "🌐 Main URL: http://$ALB_DNS"
+        echo "🧪 Test URL: http://$ALB_DNS:8080"
+
+    - name: Test application health
+      if: steps.changes.outputs.changed == 'true' && steps.monitor.outputs.deployment_status == 'success'
+      run: |
+        echo "Testing application health..."
+        MAIN_URL="${{ steps.urls.outputs.main_url }}"
+        
+        # Wait a bit for the application to be ready
+        sleep 30
+        
+        # Test main application
+        for i in {1..5}; do
+          if curl -sf "$MAIN_URL" > /dev/null; then
+            echo "✅ Application is responding on attempt $i"
+            break
+          else
+            echo "⏳ Application not ready, attempt $i/5"
+            if [ $i -eq 5 ]; then
+              echo "❌ Application health check failed after 5 attempts"
+              exit 1
+            fi
+            sleep 30
+          fi
+        done
+
+    - name: Rollback on failure
+      if: failure() && steps.changes.outputs.changed == 'true' && steps.deploy.outputs.deployment_id != ''
+      run: |
+        echo "🔄 Initiating automatic rollback..."
+        DEPLOYMENT_ID="${{ steps.deploy.outputs.deployment_id }}"
+        
+        # Stop current deployment
+        aws deploy stop-deployment --deployment-id "$DEPLOYMENT_ID" --auto-rollback-enabled || echo "Failed to stop deployment"
+        
+        # Get previous successful deployment
+        PREVIOUS_DEPLOYMENTS=$(aws deploy list-deployments \
+          --application-name "${{ env.CODEDEPLOY_APPLICATION }}" \
+          --deployment-group-name "${{ env.CODEDEPLOY_DEPLOYMENT_GROUP }}" \
+          --include-only-statuses Succeeded \
+          --max-items 1 \
+          --query 'deployments[0]' \
+          --output text)
+        
+        if [ "$PREVIOUS_DEPLOYMENTS" != "None" ] && [ -n "$PREVIOUS_DEPLOYMENTS" ]; then
+          echo "Found previous successful deployment: $PREVIOUS_DEPLOYMENTS"
+          # Note: Automatic rollback to previous version would require
+          # storing the previous task definition ARN, which is complex
+          # For now, we just stop the failed deployment
+        else
+          echo "No previous successful deployment found for automatic rollback"
+        fi
+
+    - name: Deployment summary
+      if: always() && steps.changes.outputs.changed == 'true'
+      run: |
+        echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit SHA:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Image:** ${{ steps.image-uri.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Task Definition:** ${{ steps.register-task-def.outputs.new_task_def_arn }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deployment ID:** ${{ steps.deploy.outputs.deployment_id }}" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ steps.monitor.outputs.deployment_status }}" = "success" ]; then
+          echo "- **Status:** ✅ Success" >> $GITHUB_STEP_SUMMARY
+          echo "- **Main URL:** ${{ steps.urls.outputs.main_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Test URL:** ${{ steps.urls.outputs.test_url }}" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "- **Status:** ❌ Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Skip deployment message
+      if: steps.changes.outputs.changed == 'false'
+      run: |
+        echo "## Deployment Skipped" >> $GITHUB_STEP_SUMMARY
+        echo "No significant changes detected or this is a PR event." >> $GITHUB_STEP_SUMMARY
+        echo "Deployment was skipped." >> $GITHUB_STEP_SUMMARY

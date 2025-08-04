@@ -16,6 +16,11 @@ COPY . .
 # Build the admin panel (for production)
 RUN npm run build
 
+# Hea
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD curl -f http://localhost:1337/_health || exit 1
+
 # Expose default Strapi port
 EXPOSE 1337
 
