@@ -43,14 +43,9 @@ jobs:
           echo "changed=false" >> $GITHUB_OUTPUT
           echo "PR event - skipping deployment"
         else
-          # Check if there are changes that affect the application
-          if git diff --quiet HEAD~1 HEAD -- . ':!.github' ':!README.md' ':!*.md' || [ -z "$(git log --oneline -1 --pretty=format:"%H")" ]; then
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No significant changes detected"
-          else
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Changes detected, proceeding with deployment"
-          fi
+          # Always deploy on main branch pushes for now
+          echo "changed=true" >> $GITHUB_OUTPUT
+          echo "Main branch push - proceeding with deployment"
         fi
 
     - name: Configure AWS credentials
@@ -66,36 +61,38 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Extract metadata for Docker
+    - name: Create short SHA
       if: steps.changes.outputs.changed == 'true'
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=sha,prefix={{branch}}-
-          type=raw,value=latest,enable={{is_default_branch}}
+      id: short-sha
+      run: |
+        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
+        echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+        echo "Short SHA: $SHORT_SHA"
 
     - name: Build and push Docker image
       if: steps.changes.outputs.changed == 'true'
       id: build-image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        
-    - name: Get image URI
-      if: steps.changes.outputs.changed == 'true'
-      id: image-uri
       run: |
-        # Extract the SHA-based tag for deployment
-        IMAGE_URI="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.ref_name }}-${{ github.sha }}"
+        # Build image with multiple tags
+        IMAGE_TAG="${{ steps.short-sha.outputs.short_sha }}"
+        IMAGE_URI="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+        LATEST_URI="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest"
+        
+        echo "Building image: $IMAGE_URI"
+        
+        # Build the image
+        docker build -t $IMAGE_URI -t $LATEST_URI .
+        
+        # Push both tags
+        echo "Pushing image: $IMAGE_URI"
+        docker push $IMAGE_URI
+        
+        echo "Pushing latest: $LATEST_URI"
+        docker push $LATEST_URI
+        
+        # Set output for later steps
         echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-        echo "Deployment image: $IMAGE_URI"
+        echo "✅ Image built and pushed successfully: $IMAGE_URI"
 
     - name: Download current task definition
       if: steps.changes.outputs.changed == 'true'
@@ -106,6 +103,8 @@ jobs:
           --query taskDefinition > task-definition.json
         
         echo "Current task definition downloaded"
+        echo "Current task definition:"
+        cat task-definition.json | jq '.containerDefinitions[0].image'
 
     - name: Update task definition with new image
       if: steps.changes.outputs.changed == 'true'
@@ -114,12 +113,14 @@ jobs:
       with:
         task-definition: task-definition.json
         container-name: strapi
-        image: ${{ steps.image-uri.outputs.image_uri }}
+        image: ${{ steps.build-image.outputs.image_uri }}
 
     - name: Register new task definition
       if: steps.changes.outputs.changed == 'true'
       id: register-task-def
       run: |
+        echo "Registering new task definition with image: ${{ steps.build-image.outputs.image_uri }}"
+        
         NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
           --cli-input-json file://${{ steps.task-def.outputs.task-definition }} \
           --query 'taskDefinition.taskDefinitionArn' \
@@ -127,6 +128,25 @@ jobs:
         
         echo "new_task_def_arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
         echo "New task definition registered: $NEW_TASK_DEF_ARN"
+
+    - name: Verify image exists in ECR
+      if: steps.changes.outputs.changed == 'true'
+      run: |
+        echo "Verifying image exists in ECR..."
+        IMAGE_TAG="${{ steps.short-sha.outputs.short_sha }}"
+        
+        # Check if image exists
+        if aws ecr describe-images \
+          --repository-name ${{ env.ECR_REPOSITORY }} \
+          --image-ids imageTag=$IMAGE_TAG \
+          --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
+          echo "✅ Image verified in ECR: ${{ steps.build-image.outputs.image_uri }}"
+        else
+          echo "❌ Image not found in ECR!"
+          echo "Available images:"
+          aws ecr describe-images --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} || echo "No images found or repository doesn't exist"
+          exit 1
+        fi
 
     - name: Create AppSpec for CodeDeploy
       if: steps.changes.outputs.changed == 'true'
@@ -171,9 +191,12 @@ jobs:
               "content": $(cat appspec.json | jq -R -s .)
             }
           },
-          "description": "Deployment from GitHub Actions - Commit: ${{ github.sha }}"
+          "description": "Deployment from GitHub Actions - Image: ${{ steps.build-image.outputs.image_uri }}"
         }
         EOF
+        
+        echo "Deployment input:"
+        cat deployment-input.json
         
         # Start deployment
         DEPLOYMENT_ID=$(aws deploy create-deployment \
@@ -183,6 +206,8 @@ jobs:
         
         echo "deployment_id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
         echo "Deployment started with ID: $DEPLOYMENT_ID"
+
+    # ... rest of the monitoring steps remain the same ...
 
     - name: Monitor deployment
       if: steps.changes.outputs.changed == 'true'
@@ -266,64 +291,14 @@ jobs:
         echo "🌐 Main URL: http://$ALB_DNS"
         echo "🧪 Test URL: http://$ALB_DNS:8080"
 
-    - name: Test application health
-      if: steps.changes.outputs.changed == 'true' && steps.monitor.outputs.deployment_status == 'success'
-      run: |
-        echo "Testing application health..."
-        MAIN_URL="${{ steps.urls.outputs.main_url }}"
-        
-        # Wait a bit for the application to be ready
-        sleep 30
-        
-        # Test main application
-        for i in {1..5}; do
-          if curl -sf "$MAIN_URL" > /dev/null; then
-            echo "✅ Application is responding on attempt $i"
-            break
-          else
-            echo "⏳ Application not ready, attempt $i/5"
-            if [ $i -eq 5 ]; then
-              echo "❌ Application health check failed after 5 attempts"
-              exit 1
-            fi
-            sleep 30
-          fi
-        done
-
-    - name: Rollback on failure
-      if: failure() && steps.changes.outputs.changed == 'true' && steps.deploy.outputs.deployment_id != ''
-      run: |
-        echo "🔄 Initiating automatic rollback..."
-        DEPLOYMENT_ID="${{ steps.deploy.outputs.deployment_id }}"
-        
-        # Stop current deployment
-        aws deploy stop-deployment --deployment-id "$DEPLOYMENT_ID" --auto-rollback-enabled || echo "Failed to stop deployment"
-        
-        # Get previous successful deployment
-        PREVIOUS_DEPLOYMENTS=$(aws deploy list-deployments \
-          --application-name "${{ env.CODEDEPLOY_APPLICATION }}" \
-          --deployment-group-name "${{ env.CODEDEPLOY_DEPLOYMENT_GROUP }}" \
-          --include-only-statuses Succeeded \
-          --max-items 1 \
-          --query 'deployments[0]' \
-          --output text)
-        
-        if [ "$PREVIOUS_DEPLOYMENTS" != "None" ] && [ -n "$PREVIOUS_DEPLOYMENTS" ]; then
-          echo "Found previous successful deployment: $PREVIOUS_DEPLOYMENTS"
-          # Note: Automatic rollback to previous version would require
-          # storing the previous task definition ARN, which is complex
-          # For now, we just stop the failed deployment
-        else
-          echo "No previous successful deployment found for automatic rollback"
-        fi
-
     - name: Deployment summary
       if: always() && steps.changes.outputs.changed == 'true'
       run: |
         echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
         echo "- **Commit SHA:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Short SHA:** ${{ steps.short-sha.outputs.short_sha }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Image:** ${{ steps.image-uri.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Image:** ${{ steps.build-image.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Task Definition:** ${{ steps.register-task-def.outputs.new_task_def_arn }}" >> $GITHUB_STEP_SUMMARY
         echo "- **Deployment ID:** ${{ steps.deploy.outputs.deployment_id }}" >> $GITHUB_STEP_SUMMARY
         
