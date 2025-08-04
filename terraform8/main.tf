@@ -164,7 +164,7 @@ resource "aws_lb_target_group" "strapi_blue_tg" {
     unhealthy_threshold = 2
     timeout             = 30
     interval            = 60
-    path                = "/"
+    path                = "/admin"
     matcher             = "200"
     port                = "traffic-port"
     protocol            = "HTTP"
@@ -189,7 +189,7 @@ resource "aws_lb_target_group" "strapi_green_tg" {
     unhealthy_threshold = 2
     timeout             = 30
     interval            = 60
-    path                = "/"
+    path                = "/admin"
     matcher             = "200"
     port                = "traffic-port"
     protocol            = "HTTP"
