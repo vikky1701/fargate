@@ -161,11 +161,11 @@ resource "aws_lb_target_group" "strapi_blue_tg" {
   health_check {
     enabled             = true
     healthy_threshold   = 2
-    unhealthy_threshold = 3
-    timeout             = 10
-    interval            = 30
+    unhealthy_threshold = 2
+    timeout             = 30
+    interval            = 60
     path                = "/"
-    matcher             = "200,302"
+    matcher             = "200"
     port                = "traffic-port"
     protocol            = "HTTP"
   }
@@ -186,11 +186,11 @@ resource "aws_lb_target_group" "strapi_green_tg" {
   health_check {
     enabled             = true
     healthy_threshold   = 2
-    unhealthy_threshold = 3
-    timeout             = 10
-    interval            = 30
+    unhealthy_threshold = 2
+    timeout             = 30
+    interval            = 60
     path                = "/"
-    matcher             = "200,302"
+    matcher             = "200"
     port                = "traffic-port"
     protocol            = "HTTP"
   }
@@ -505,8 +505,8 @@ resource "aws_ecs_task_definition" "strapi_task" {
         }
       }
 
-       healthCheck = {
-        command = ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:1337/ || exit 1"]
+      healthCheck = {
+        command = ["CMD-SHELL", "curl -f http://localhost:1337/_health || exit 1"]
         interval = 30
         timeout = 5
         retries = 3
