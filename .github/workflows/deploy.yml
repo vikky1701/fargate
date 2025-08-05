@@ -25,7 +25,7 @@ jobs:
   build-and-deploy:
     name: Build and Deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
     - name: Checkout code
@@ -73,38 +73,78 @@ jobs:
       if: steps.changes.outputs.changed == 'true'
       id: build-image
       run: |
-        # Build image with multiple tags
+        # Define image tags
         IMAGE_TAG="${{ steps.short-sha.outputs.short_sha }}"
         IMAGE_URI="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
         LATEST_URI="${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest"
         
-        echo "Building image: $IMAGE_URI"
+        echo "Building image with SHA tag: $IMAGE_TAG"
+        echo "Image URI: $IMAGE_URI"
         
-        # Build the image
+        # Build the image with both tags
         docker build -t $IMAGE_URI -t $LATEST_URI .
         
-        # Push both tags
-        echo "Pushing image: $IMAGE_URI"
+        # Verify the image was built
+        echo "Verifying built image..."
+        docker images | grep ${{ env.ECR_REPOSITORY }}
+        
+        # Push SHA-tagged image first (this is what we'll deploy)
+        echo "Pushing SHA-tagged image: $IMAGE_URI"
         docker push $IMAGE_URI
         
-        echo "Pushing latest: $LATEST_URI"
+        # Push latest tag
+        echo "Pushing latest image: $LATEST_URI"
         docker push $LATEST_URI
         
-        # Set output for later steps
+        # Set output for later steps - ALWAYS use the SHA-tagged image for deployment
         echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+        echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         echo "✅ Image built and pushed successfully: $IMAGE_URI"
+
+    - name: Verify image exists in ECR
+      if: steps.changes.outputs.changed == 'true'
+      run: |
+        echo "Verifying SHA-tagged image exists in ECR..."
+        IMAGE_TAG="${{ steps.build-image.outputs.image_tag }}"
+        
+        # Wait a moment for ECR to register the image
+        sleep 10
+        
+        # Check if the specific SHA-tagged image exists
+        if aws ecr describe-images \
+          --repository-name ${{ env.ECR_REPOSITORY }} \
+          --image-ids imageTag=$IMAGE_TAG \
+          --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
+          echo "✅ SHA-tagged image verified in ECR: ${{ steps.build-image.outputs.image_uri }}"
+          
+          # Get image details
+          aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --image-ids imageTag=$IMAGE_TAG \
+            --region ${{ env.AWS_REGION }} \
+            --query 'imageDetails[0].{Digest:imageDigest,Size:imageSizeInBytes,PushedAt:imagePushedAt}'
+        else
+          echo "❌ SHA-tagged image not found in ECR!"
+          echo "Available images:"
+          aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'imageDetails[*].{Tags:imageTags,Digest:imageDigest,PushedAt:imagePushedAt}' || echo "No images found"
+          exit 1
+        fi
 
     - name: Download current task definition
       if: steps.changes.outputs.changed == 'true'
       id: download-task-def
       run: |
+        echo "Downloading current task definition..."
         aws ecs describe-task-definition \
           --task-definition ${{ env.ECS_TASK_DEFINITION }} \
           --query taskDefinition > task-definition.json
         
         echo "Current task definition downloaded"
-        echo "Current task definition:"
-        cat task-definition.json | jq '.containerDefinitions[0].image'
+        echo "Current image in task definition:"
+        cat task-definition.json | jq -r '.containerDefinitions[0].image'
 
     - name: Update task definition with new image
       if: steps.changes.outputs.changed == 'true'
@@ -121,6 +161,10 @@ jobs:
       run: |
         echo "Registering new task definition with image: ${{ steps.build-image.outputs.image_uri }}"
         
+        # Validate the task definition file
+        echo "Validating task definition..."
+        cat ${{ steps.task-def.outputs.task-definition }} | jq -r '.containerDefinitions[0].image'
+        
         NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
           --cli-input-json file://${{ steps.task-def.outputs.task-definition }} \
           --query 'taskDefinition.taskDefinitionArn' \
@@ -128,25 +172,13 @@ jobs:
         
         echo "new_task_def_arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
         echo "New task definition registered: $NEW_TASK_DEF_ARN"
-
-    - name: Verify image exists in ECR
-      if: steps.changes.outputs.changed == 'true'
-      run: |
-        echo "Verifying image exists in ECR..."
-        IMAGE_TAG="${{ steps.short-sha.outputs.short_sha }}"
         
-        # Check if image exists
-        if aws ecr describe-images \
-          --repository-name ${{ env.ECR_REPOSITORY }} \
-          --image-ids imageTag=$IMAGE_TAG \
-          --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
-          echo "✅ Image verified in ECR: ${{ steps.build-image.outputs.image_uri }}"
-        else
-          echo "❌ Image not found in ECR!"
-          echo "Available images:"
-          aws ecr describe-images --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} || echo "No images found or repository doesn't exist"
-          exit 1
-        fi
+        # Verify the new task definition has the correct image
+        echo "Verifying new task definition image..."
+        aws ecs describe-task-definition \
+          --task-definition "$NEW_TASK_DEF_ARN" \
+          --query 'taskDefinition.containerDefinitions[0].image' \
+          --output text
 
     - name: Create AppSpec for CodeDeploy
       if: steps.changes.outputs.changed == 'true'
@@ -172,8 +204,9 @@ jobs:
         }
         EOF
         
-        echo "AppSpec created:"
-        cat appspec.json
+        echo "AppSpec created for task definition: ${{ steps.register-task-def.outputs.new_task_def_arn }}"
+        echo "AppSpec content:"
+        cat appspec.json | jq .
 
     - name: Start CodeDeploy deployment
       if: steps.changes.outputs.changed == 'true'
@@ -191,12 +224,13 @@ jobs:
               "content": $(cat appspec.json | jq -R -s .)
             }
           },
-          "description": "Deployment from GitHub Actions - Image: ${{ steps.build-image.outputs.image_uri }}"
+          "description": "GitHub Actions deployment - SHA: ${{ steps.short-sha.outputs.short_sha }} - Image: ${{ steps.build-image.outputs.image_uri }}"
         }
         EOF
         
-        echo "Deployment input:"
-        cat deployment-input.json
+        echo "Starting CodeDeploy deployment..."
+        echo "Deployment configuration:"
+        cat deployment-input.json | jq .
         
         # Start deployment
         DEPLOYMENT_ID=$(aws deploy create-deployment \
@@ -205,9 +239,8 @@ jobs:
           --output text)
         
         echo "deployment_id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
-        echo "Deployment started with ID: $DEPLOYMENT_ID"
-
-    # ... rest of the monitoring steps remain the same ...
+        echo "✅ Deployment started with ID: $DEPLOYMENT_ID"
+        echo "🔍 Deploying image: ${{ steps.build-image.outputs.image_uri }}"
 
     - name: Monitor deployment
       if: steps.changes.outputs.changed == 'true'
@@ -224,8 +257,8 @@ jobs:
             --output text 2>/dev/null || echo "UNKNOWN"
         }
         
-        # Monitor loop
-        TIMEOUT=1800  # 30 minutes
+        # Monitor loop with increased timeout for build time
+        TIMEOUT=2700  # 45 minutes to account for build + deployment time
         ELAPSED=0
         INTERVAL=30
         
@@ -236,18 +269,26 @@ jobs:
           case $STATUS in
             "Succeeded")
               echo "✅ Deployment completed successfully!"
+              echo "🎯 Successfully deployed image: ${{ steps.build-image.outputs.image_uri }}"
               echo "deployment_status=success" >> $GITHUB_OUTPUT
               break
               ;;
             "Failed"|"Stopped")
               echo "❌ Deployment failed with status: $STATUS"
               
-              # Get failure details
+              # Get detailed failure information
               echo "Failure details:"
               aws deploy get-deployment \
                 --deployment-id "$DEPLOYMENT_ID" \
                 --query 'deploymentInfo.errorInformation' \
-                --output text || echo "No error details available"
+                --output table || echo "No error details available"
+              
+              # Get deployment events for more context
+              echo "Recent deployment events:"
+              aws deploy list-deployment-instances \
+                --deployment-id "$DEPLOYMENT_ID" \
+                --query 'instancesList[*]' \
+                --output table || echo "No deployment instances found"
               
               echo "deployment_status=failed" >> $GITHUB_OUTPUT
               exit 1
@@ -280,6 +321,7 @@ jobs:
       if: steps.changes.outputs.changed == 'true' && steps.monitor.outputs.deployment_status == 'success'
       id: urls
       run: |
+        echo "Getting load balancer DNS..."
         ALB_DNS=$(aws elbv2 describe-load-balancers \
           --names "strapi-alb-vivek" \
           --query 'LoadBalancers[0].DNSName' \
@@ -294,25 +336,33 @@ jobs:
     - name: Deployment summary
       if: always() && steps.changes.outputs.changed == 'true'
       run: |
-        echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
-        echo "- **Commit SHA:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Short SHA:** ${{ steps.short-sha.outputs.short_sha }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Image:** ${{ steps.build-image.outputs.image_uri }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Task Definition:** ${{ steps.register-task-def.outputs.new_task_def_arn }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Deployment ID:** ${{ steps.deploy.outputs.deployment_id }}" >> $GITHUB_STEP_SUMMARY
+        echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| **Commit SHA** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Short SHA** | \`${{ steps.short-sha.outputs.short_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Branch** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Image** | \`${{ steps.build-image.outputs.image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Task Definition** | \`${{ steps.register-task-def.outputs.new_task_def_arn }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| **Deployment ID** | \`${{ steps.deploy.outputs.deployment_id }}\` |" >> $GITHUB_STEP_SUMMARY
         
         if [ "${{ steps.monitor.outputs.deployment_status }}" = "success" ]; then
-          echo "- **Status:** ✅ Success" >> $GITHUB_STEP_SUMMARY
-          echo "- **Main URL:** ${{ steps.urls.outputs.main_url }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Test URL:** ${{ steps.urls.outputs.test_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ✅ **SUCCESS** |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Main URL** | [${{ steps.urls.outputs.main_url }}](${{ steps.urls.outputs.main_url }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Test URL** | [${{ steps.urls.outputs.test_url }}](${{ steps.urls.outputs.test_url }}) |" >> $GITHUB_STEP_SUMMARY
         else
-          echo "- **Status:** ❌ Failed" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ❌ **FAILED** |" >> $GITHUB_STEP_SUMMARY
         fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🎯 Deployed Image Details" >> $GITHUB_STEP_SUMMARY
+        echo "The deployment used the image tagged with commit SHA \`${{ steps.short-sha.outputs.short_sha }}\` to ensure exact version tracking." >> $GITHUB_STEP_SUMMARY
 
     - name: Skip deployment message
       if: steps.changes.outputs.changed == 'false'
       run: |
-        echo "## Deployment Skipped" >> $GITHUB_STEP_SUMMARY
+        echo "## ⏭️ Deployment Skipped" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "No significant changes detected or this is a PR event." >> $GITHUB_STEP_SUMMARY
-        echo "Deployment was skipped." >> $GITHUB_STEP_SUMMARY
+        echo "Deployment was skipped to avoid unnecessary deployments." >> $GITHUB_STEP_SUMMARY
